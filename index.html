@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <title>Fake Job Detector 🔍</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;-webkit-font-smoothing:antialiased}
+    body{background:#07070f;color:#e2e2ff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow-x:hidden}
+    @keyframes up{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes toastin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+    textarea,input,select,button{font-family:inherit;-webkit-tap-highlight-color:transparent}
+    textarea:focus,input:focus{outline:none}
+    ::-webkit-scrollbar{width:3px}
+    ::-webkit-scrollbar-thumb{background:#2a2a3e;border-radius:2px}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect, useCallback } = React;
+
+const ADMIN_PASSWORD = "admin123";
+const DB_KEY = "fjd-v1";
+
+const SYSTEM_PROMPT = `You are an expert fake job posting detector. Analyze job postings and return ONLY valid JSON (no markdown) with this exact structure:
+{"verdict":"FAKE"|"SUSPICIOUS"|"LIKELY_REAL"|"REAL","confidence":0-100,"riskScore":0-100,"summary":"2-3 sentence assessment","redFlags":[{"severity":"HIGH"|"MEDIUM"|"LOW","category":"string","detail":"string"}],"greenFlags":[{"category":"string","detail":"string"}],"analysisBreakdown":{"salaryAnalysis":"string","companyAnalysis":"string","requirementsAnalysis":"string","contactAnalysis":"string","languageAnalysis":"string"},"recommendation":"string"}
+Check for: unrealistic salary, vague company info, upfront payment requests, poor grammar, generic email domains (gmail/yahoo for corporate roles), urgent pressure tactics, missing job requirements, requests for SSN or bank info.`;
+
+const V = {
+  FAKE:        {color:"#ff2d55",bg:"#1a0008",label:"FAKE JOB",   icon:"✗",short:"FAKE"},
+  SUSPICIOUS:  {color:"#ff9f0a",bg:"#1a0a00",label:"SUSPICIOUS", icon:"⚠",short:"SUSP"},
+  LIKELY_REAL: {color:"#30d158",bg:"#001a0a",label:"LIKELY REAL",icon:"~",short:"LEGIT?"},
+  REAL:        {color:"#30d158",bg:"#001a0a",label:"AUTHENTIC",  icon:"✓",short:"REAL"},
+};
+const SEV = {HIGH:"#ff2d55",MEDIUM:"#ff9f0a",LOW:"#ffd60a"};
+
+const EXAMPLES = [
+  {label:"🚨 Scam WFH",    text:"HIRING NOW!!! Work From Home – Earn $8,000/WEEK!! No experience needed! Send SSN + bank info to receive starter kit.\nEmail: jobs4u@gmail.com\nURGENT – Only 3 spots left!"},
+  {label:"✅ Real Job",     text:"Senior Software Engineer\nStripe | SF, CA | $180k–$220k + equity\n5+ yrs backend (Python/Go), distributed systems.\ncareers.stripe.com | recruiting@stripe.com"},
+  {label:"🎭 Shopper Scam",text:"Mystery Shopper – $300/day! We mail a $2,500 check. Buy gift cards, keep $300, wire the rest back.\nglobalshop99@yahoo.com"},
+];
+
+function dbLoad(){try{return JSON.parse(localStorage.getItem(DB_KEY))||emptyDb();}catch{return emptyDb();}}
+function dbSave(db){try{localStorage.setItem(DB_KEY,JSON.stringify(db));}catch{}}
+const emptyDb=()=>({analyses:[],stats:{total:0,fake:0,suspicious:0,real:0,avgRisk:0}});
+function recompute(a){
+  const total=a.length,fake=a.filter(x=>x.verdict==="FAKE").length,
+    suspicious=a.filter(x=>x.verdict==="SUSPICIOUS").length,
+    real=a.filter(x=>["REAL","LIKELY_REAL"].includes(x.verdict)).length,
+    avgRisk=total?Math.round(a.reduce((s,x)=>s+x.riskScore,0)/total):0;
+  return{total,fake,suspicious,real,avgRisk};
+}
+
+const Spin=()=><span style={{display:"inline-block",width:14,height:14,border:"2px solid #ff2d55",borderTopColor:"transparent",borderRadius:"50%",animation:"spin .8s linear infinite",verticalAlign:"middle"}}/>;
+
+const Tag=({verdict})=>{const v=V[verdict]||V.SUSPICIOUS;return<span style={{fontSize:"10px",color:v.color,padding:"2px 7px",border:`1px solid ${v.color}44`,borderRadius:"4px",background:v.bg,whiteSpace:"nowrap",fontWeight:700}}>{v.short}</span>;};
+
+const Stat=({label,val,color="#e2e2ff"})=>(
+  <div style={{padding:"12px 8px",background:"#0d0d1a",borderRadius:"10px",border:"1px solid #1e1e2e",textAlign:"center",flex:1}}>
+    <div style={{fontSize:"22px",fontWeight:900,color,lineHeight:1}}>{val}</div>
+    <div style={{fontSize:"9px",color:"#555",letterSpacing:"1px",marginTop:3}}>{label}</div>
+  </div>
+);
+
+function RiskArc({score}){
+  const a=(score/100)*180,r=52,cx=65,cy=65;
+  const rd=d=>(d*Math.PI)/180;
+  const x1=cx+r*Math.cos(rd(180)),y1=cy+r*Math.sin(rd(180));
+  const ea=180+a,x2=cx+r*Math.cos(rd(ea)),y2=cy+r*Math.sin(rd(ea));
+  const c=score>70?"#ff2d55":score>40?"#ff9f0a":"#30d158";
+  return(
+    <svg width="130" height="75" viewBox="0 0 130 75" style={{flexShrink:0}}>
+      <path d={`M ${cx-r} ${cy} A ${r} ${r} 0 0 1 ${cx+r} ${cy}`} fill="none" stroke="#1e1e2e" strokeWidth="10" strokeLinecap="round"/>
+      {score>0&&<path d={`M ${x1} ${y1} A ${r} ${r} 0 ${a>180?1:0} 1 ${x2} ${y2}`} fill="none" stroke={c} strokeWidth="10" strokeLinecap="round" style={{filter:`drop-shadow(0 0 4px ${c})`}}/>}
+      <text x={cx} y={cy-5} textAnchor="middle" fill={c} fontSize="20" fontFamily="monospace" fontWeight="bold">{score}</text>
+      <text x={cx} y={cy+11} textAnchor="middle" fill="#555" fontSize="8" fontFamily="monospace">RISK</text>
+    </svg>
+  );
+}
+
+function ResultCard({result}){
+  const cfg=V[result.verdict]||V.SUSPICIOUS;
+  const [tab,setTab]=useState("flags");
+  return(
+    <div style={{animation:"up .4s ease forwards",marginTop:16}}>
+      <div style={{border:`2px solid ${cfg.color}`,borderRadius:14,padding:16,marginBottom:12,background:cfg.bg,position:"relative",overflow:"hidden"}}>
+        <div style={{position:"absolute",inset:0,background:`radial-gradient(circle at top right,${cfg.color}18,transparent 65%)`,pointerEvents:"none"}}/>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:"22px",fontWeight:900,color:cfg.color,letterSpacing:3,textShadow:`0 0 14px ${cfg.color}`,marginBottom:6}}>{cfg.icon} {cfg.label}</div>
+            <p style={{color:"#ccc",fontSize:"13px",lineHeight:1.6,margin:0}}>{result.summary}</p>
+          </div>
+          <RiskArc score={result.riskScore}/>
+        </div>
+        <div style={{marginTop:12}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={{color:"#666",fontSize:"10px"}}>CONFIDENCE</span>
+            <span style={{color:cfg.color,fontSize:"10px",fontWeight:700}}>{result.confidence}%</span>
+          </div>
+          <div style={{height:4,background:"#1e1e2e",borderRadius:2,overflow:"hidden"}}>
+            <div style={{height:"100%",width:`${result.confidence}%`,background:cfg.color,borderRadius:2,transition:"width 1s ease",boxShadow:`0 0 6px ${cfg.color}`}}/>
+          </div>
+        </div>
+      </div>
+
+      <div style={{display:"flex",gap:3,marginBottom:12,background:"#0d0d1a",borderRadius:8,padding:3}}>
+        {["flags","details","advice"].map(t=>(
+          <button key={t} onClick={()=>setTab(t)} style={{flex:1,padding:"9px 4px",border:"none",cursor:"pointer",borderRadius:6,background:tab===t?"#1e1e2e":"transparent",color:tab===t?"#e2e2ff":"#555",fontSize:"11px",letterSpacing:1,textTransform:"uppercase",transition:"all .2s"}}>{t}</button>
+        ))}
+      </div>
+
+      {tab==="flags"&&(
+        <div>
+          {result.redFlags&&result.redFlags.length>0&&(
+            <div style={{marginBottom:12}}>
+              <div style={{color:"#ff2d55",fontSize:"10px",letterSpacing:2,marginBottom:8}}>⚑ RED FLAGS ({result.redFlags.length})</div>
+              {result.redFlags.map((f,i)=>(
+                <div key={i} style={{display:"flex",gap:8,padding:"10px 12px",background:"#0d0d1a",borderRadius:10,marginBottom:6,borderLeft:`3px solid ${SEV[f.severity]||"#ff2d55"}`}}>
+                  <span style={{fontSize:"8px",color:SEV[f.severity],padding:"2px 5px",border:`1px solid ${SEV[f.severity]}`,borderRadius:3,height:"fit-content",whiteSpace:"nowrap",marginTop:2}}>{f.severity}</span>
+                  <div>
+                    <div style={{color:"#e2e2ff",fontSize:"12px",fontWeight:600,marginBottom:2}}>{f.category}</div>
+                    <div style={{color:"#777",fontSize:"12px",lineHeight:1.5}}>{f.detail}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {result.greenFlags&&result.greenFlags.length>0&&(
+            <div>
+              <div style={{color:"#30d158",fontSize:"10px",letterSpacing:2,marginBottom:8}}>✓ GREEN FLAGS ({result.greenFlags.length})</div>
+              {result.greenFlags.map((f,i)=>(
+                <div key={i} style={{padding:"10px 12px",background:"#0d0d1a",borderRadius:10,marginBottom:6,borderLeft:"3px solid #30d158"}}>
+                  <div style={{color:"#e2e2ff",fontSize:"12px",fontWeight:600,marginBottom:2}}>{f.category}</div>
+                  <div style={{color:"#777",fontSize:"12px",lineHeight:1.5}}>{f.detail}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab==="details"&&result.analysisBreakdown&&(
+        <div style={{display:"grid",gap:8}}>
+          {Object.entries(result.analysisBreakdown).map(([k,v])=>{
+            const lbl={salaryAnalysis:"💰 Salary",companyAnalysis:"🏢 Company",requirementsAnalysis:"📋 Requirements",contactAnalysis:"📧 Contact",languageAnalysis:"📝 Language"};
+            return(
+              <div key={k} style={{padding:12,background:"#0d0d1a",borderRadius:10}}>
+                <div style={{color:"#555",fontSize:"9px",letterSpacing:1,marginBottom:4}}>{lbl[k]||k}</div>
+                <div style={{color:"#bbb",fontSize:"13px",lineHeight:1.6}}>{v}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {tab==="advice"&&(
+        <div style={{padding:16,background:"#0d0d1a",borderRadius:10,border:`1px solid ${cfg.color}33`}}>
+          <div style={{color:cfg.color,fontSize:"10px",letterSpacing:2,marginBottom:10}}>WHAT TO DO</div>
+          <p style={{color:"#ccc",lineHeight:1.7,fontSize:"13px",margin:0}}>{result.recommendation}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdminPanel({db,onDelete,onClearAll,onClose}){
+  const [tab,setTab]=useState("dash");
+  const [sel,setSel]=useState(null);
+  const [search,setSearch]=useState("");
+  const [fV,setFV]=useState("ALL");
+  const {analyses,stats}=db;
+  const filtered=analyses.filter(a=>fV==="ALL"||a.verdict===fV).filter(a=>!search||a.jobSnippet.toLowerCase().includes(search.toLowerCase()));
+  const dist=["FAKE","SUSPICIOUS","LIKELY_REAL","REAL"].map(v=>({v,n:analyses.filter(a=>a.verdict===v).length,pct:analyses.length?Math.round(analyses.filter(a=>a.verdict===v).length/analyses.length*100):0}));
+
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.93)",zIndex:1000,overflowY:"auto",WebkitOverflowScrolling:"touch"}}>
+      <div style={{minHeight:"100%",maxWidth:600,margin:"0 auto",background:"#07070f",borderLeft:"1px solid #1e1e2e",borderRight:"1px solid #1e1e2e"}}>
+        <div style={{padding:"14px 16px",background:"#0d0d1a",borderBottom:"1px solid #1e1e2e",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:10}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:18}}>🛡️</span>
+            <div>
+              <div style={{fontWeight:"bold",fontSize:"13px",letterSpacing:2,color:"#ff2d55"}}>ADMIN PANEL</div>
+              <div style={{fontSize:"9px",color:"#444"}}>{analyses.length} RECORDS IN DATABASE</div>
+            </div>
+          </div>
+          <button onClick={onClose} style={{background:"#1e1e2e",border:"1px solid #333",borderRadius:8,color:"#888",padding:"9px 14px",cursor:"pointer",fontSize:"12px"}}>✕ Close</button>
+        </div>
+
+        <div style={{display:"flex",gap:3,padding:"10px 12px",background:"#0a0a16",borderBottom:"1px solid #1e1e2e"}}>
+          {["dash","records","settings"].map(t=>(
+            <button key={t} onClick={()=>{setTab(t);setSel(null);}} style={{flex:1,padding:"9px 4px",border:"none",cursor:"pointer",borderRadius:6,background:tab===t?"#ff2d55":"#1e1e2e",color:tab===t?"white":"#555",fontSize:"11px",letterSpacing:1,textTransform:"uppercase"}}>{t}</button>
+          ))}
+        </div>
+
+        <div style={{padding:16}}>
+          {tab==="dash"&&(
+            <div>
+              <div style={{display:"flex",gap:8,marginBottom:16}}>
+                <Stat label="TOTAL" val={stats.total} color="#e2e2ff"/>
+                <Stat label="FAKE" val={stats.fake} color="#ff2d55"/>
+                <Stat label="SUSP" val={stats.suspicious} color="#ff9f0a"/>
+                <Stat label="LEGIT" val={stats.real} color="#30d158"/>
+              </div>
+              <div style={{padding:"12px 14px",background:"#0d0d1a",borderRadius:10,border:"1px solid #1e1e2e",marginBottom:16,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{color:"#666",fontSize:"12px"}}>AVG RISK SCORE</span>
+                <span style={{fontSize:"20px",fontWeight:900,color:stats.avgRisk>60?"#ff2d55":stats.avgRisk>30?"#ff9f0a":"#30d158"}}>{stats.avgRisk}<span style={{fontSize:"12px",color:"#555"}}>/100</span></span>
+              </div>
+              <div style={{marginBottom:16}}>
+                <div style={{color:"#444",fontSize:"10px",letterSpacing:2,marginBottom:10}}>VERDICT BREAKDOWN</div>
+                {dist.map(({v,n,pct})=>{
+                  const c=V[v];
+                  return(
+                    <div key={v} style={{marginBottom:10}}>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                        <span style={{fontSize:"11px",color:c.color}}>{v}</span>
+                        <span style={{fontSize:"11px",color:"#444"}}>{n} ({pct}%)</span>
+                      </div>
+                      <div style={{height:5,background:"#1e1e2e",borderRadius:3,overflow:"hidden"}}>
+                        <div style={{height:"100%",width:`${pct}%`,background:c.color,borderRadius:3,transition:"width .8s ease"}}/>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {analyses.slice(0,5).map((a,i)=>(
+                <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"11px 12px",background:"#0d0d1a",borderRadius:10,marginBottom:6,cursor:"pointer",border:"1px solid #1e1e2e"}} onClick={()=>{setSel(a);setTab("records");}}>
+                  <Tag verdict={a.verdict}/>
+                  <span style={{color:"#666",fontSize:"12px",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.jobSnippet}</span>
+                  <span style={{color:a.riskScore>70?"#ff2d55":a.riskScore>40?"#ff9f0a":"#30d158",fontSize:"12px",fontWeight:700}}>{a.riskScore}</span>
+                </div>
+              ))}
+              {analyses.length===0&&<div style={{textAlign:"center",padding:40,color:"#333",fontSize:"12px"}}>NO DATA YET — RUN YOUR FIRST ANALYSIS</div>}
+            </div>
+          )}
+
+          {tab==="records"&&(
+            <div>
+              {sel?(
+                <div>
+                  <button onClick={()=>setSel(null)} style={{background:"#1e1e2e",border:"1px solid #333",borderRadius:6,color:"#888",padding:"9px 14px",cursor:"pointer",fontSize:"11px",marginBottom:14}}>← BACK</button>
+                  <div style={{padding:12,background:"#0d0d1a",borderRadius:10,border:"1px solid #1e1e2e",marginBottom:12}}>
+                    <div style={{color:"#444",fontSize:"9px",marginBottom:6}}>{new Date(sel.timestamp).toLocaleString()}</div>
+                    <div style={{color:"#888",fontSize:"12px",lineHeight:1.6,maxHeight:100,overflowY:"auto",whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{sel.fullText}</div>
+                  </div>
+                  <ResultCard result={sel.result}/>
+                  <button onClick={()=>{onDelete(sel.id);setSel(null);}} style={{marginTop:12,width:"100%",padding:"13px",background:"#1a0008",border:"1px solid #ff2d5544",borderRadius:10,color:"#ff2d55",cursor:"pointer",fontSize:"13px",fontWeight:700}}>🗑 DELETE THIS RECORD</button>
+                </div>
+              ):(
+                <div>
+                  <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search records..." style={{width:"100%",padding:"11px 14px",background:"#0d0d1a",border:"1px solid #2a2a3e",borderRadius:8,color:"#e2e2ff",fontSize:"14px",marginBottom:8}}/>
+                  <div style={{display:"flex",gap:6,marginBottom:14,overflowX:"auto",WebkitOverflowScrolling:"touch",paddingBottom:2}}>
+                    {["ALL","FAKE","SUSPICIOUS","LIKELY_REAL","REAL"].map(v=>(
+                      <button key={v} onClick={()=>setFV(v)} style={{padding:"7px 12px",border:`1px solid ${fV===v?"#ff2d55":"#2a2a3e"}`,borderRadius:6,background:fV===v?"#1e1e2e":"transparent",color:fV===v?"#e2e2ff":"#555",fontSize:"10px",cursor:"pointer",whiteSpace:"nowrap",flexShrink:0}}>{v}</button>
+                    ))}
+                  </div>
+                  <div style={{color:"#333",fontSize:"10px",marginBottom:10}}>{filtered.length} RECORDS</div>
+                  {filtered.length===0?<div style={{textAlign:"center",padding:40,color:"#333"}}>NO RECORDS FOUND</div>:(
+                    <div style={{display:"grid",gap:6}}>
+                      {filtered.map((a,i)=>(
+                        <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"12px",background:"#0d0d1a",borderRadius:10,border:"1px solid #1e1e2e",cursor:"pointer"}} onClick={()=>setSel(a)}>
+                          <Tag verdict={a.verdict}/>
+                          <div style={{flex:1,minWidth:0}}>
+                            <div style={{color:"#bbb",fontSize:"12px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:2}}>{a.jobSnippet}</div>
+                            <div style={{color:"#333",fontSize:"10px"}}>{new Date(a.timestamp).toLocaleDateString()}</div>
+                          </div>
+                          <span style={{color:a.riskScore>70?"#ff2d55":a.riskScore>40?"#ff9f0a":"#30d158",fontSize:"13px",fontWeight:700,minWidth:24,textAlign:"right"}}>{a.riskScore}</span>
+                          <button onClick={e=>{e.stopPropagation();onDelete(a.id);}} style={{background:"transparent",border:"1px solid #2a2a3e",borderRadius:6,color:"#444",cursor:"pointer",padding:"6px 9px",fontSize:"12px",flexShrink:0}}>🗑</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab==="settings"&&(
+            <div>
+              {[{l:"Storage",v:"Browser localStorage"},{l:"Total Records",v:String(analyses.length)},{l:"Avg Risk Score",v:`${stats.avgRisk}/100`},{l:"Fake Rate",v:analyses.length?`${Math.round(stats.fake/analyses.length*100)}%`:"–"}].map(({l,v})=>(
+                <div key={l} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 14px",background:"#0d0d1a",borderRadius:10,border:"1px solid #1e1e2e",marginBottom:8}}>
+                  <span style={{color:"#555",fontSize:"12px"}}>{l}</span>
+                  <span style={{color:"#aaa",fontSize:"12px"}}>{v}</span>
+                </div>
+              ))}
+              <div style={{marginTop:20,padding:16,background:"#1a0008",borderRadius:10,border:"1px solid #ff2d5533"}}>
+                <div style={{color:"#ff2d55",fontSize:"13px",fontWeight:600,marginBottom:6}}>⚠ Danger Zone</div>
+                <div style={{color:"#773344",fontSize:"12px",lineHeight:1.5,marginBottom:14}}>Permanently delete all {analyses.length} records. Cannot be undone.</div>
+                <button onClick={onClearAll} style={{width:"100%",padding:"13px",background:"#ff2d55",border:"none",borderRadius:8,color:"white",fontWeight:700,cursor:"pointer",fontSize:"13px"}}>🗑 CLEAR ALL DATA</button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function App(){
+  const [screen,setScreen]=useState("main");
+  const [jobText,setJobText]=useState("");
+  const [result,setResult]=useState(null);
+  const [loading,setLoading]=useState(false);
+  const [error,setError]=useState(null);
+  const [db,setDb]=useState(()=>dbLoad());
+  const [pass,setPass]=useState("");
+  const [loginErr,setLoginErr]=useState("");
+  const [toast,setToast]=useState(null);
+
+  const notify=(msg,color="#30d158")=>{setToast({msg,color});setTimeout(()=>setToast(null),2500);};
+
+  const analyze=async()=>{
+    if(!jobText.trim())return;
+    setLoading(true);setError(null);setResult(null);
+    try{
+      const res=await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",
+        headers:{"Content-Type":"application/json","x-api-key":"placeholder","anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1500,system:SYSTEM_PROMPT,messages:[{role:"user",content:`Analyze this job posting:\n\n${jobText}`}]})
+      });
+      if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e?.error?.message||`HTTP ${res.status}`);}
+      const data=await res.json();
+      const raw=data.content?.find(b=>b.type==="text")?.text||"";
+      const parsed=JSON.parse(raw.replace(/```json\n?|```/g,"").trim());
+      setResult(parsed);
+      const record={id:Date.now().toString(),timestamp:new Date().toISOString(),verdict:parsed.verdict,riskScore:parsed.riskScore,jobSnippet:jobText.trim().slice(0,100),fullText:jobText.trim(),result:parsed};
+      const newA=[record,...db.analyses];
+      const newDb={analyses:newA,stats:recompute(newA)};
+      setDb(newDb);dbSave(newDb);
+      notify("✓ Saved to database");
+    }catch(e){setError(`Failed: ${e.message||"Try again"}`);}
+    finally{setLoading(false);}
+  };
+
+  const handleDelete=useCallback((id)=>{
+    const newA=db.analyses.filter(a=>a.id!==id);
+    const newDb={analyses:newA,stats:recompute(newA)};
+    setDb(newDb);dbSave(newDb);notify("Deleted","#ff9f0a");
+  },[db]);
+
+  const handleClear=useCallback(()=>{
+    const newDb=emptyDb();setDb(newDb);dbSave(newDb);notify("Cleared","#ff2d55");
+  },[]);
+
+  const doLogin=()=>{
+    if(pass===ADMIN_PASSWORD){setScreen("admin");setLoginErr("");setPass("");}
+    else setLoginErr("Wrong password");
+  };
+
+  return(
+    <div style={{minHeight:"100vh",background:"#07070f",overflowX:"hidden"}}>
+
+      {toast&&<div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",zIndex:3000,padding:"10px 20px",background:"#0d0d1a",border:`1px solid ${toast.color}`,borderRadius:10,color:toast.color,fontSize:"12px",animation:"toastin .3s ease",whiteSpace:"nowrap",pointerEvents:"none",boxShadow:`0 4px 20px ${toast.color}33`}}>{toast.msg}</div>}
+
+      {screen==="login"&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.9)",zIndex:900,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+          <div style={{background:"#0d0d1a",border:"1px solid #ff2d5544",borderRadius:16,padding:28,width:"100%",maxWidth:320,textAlign:"center"}}>
+            <div style={{fontSize:32,marginBottom:10}}>🛡️</div>
+            <div style={{fontSize:"13px",letterSpacing:2,color:"#ff2d55",marginBottom:4}}>ADMIN ACCESS</div>
+            <div style={{color:"#444",fontSize:"11px",marginBottom:20}}>Default password: admin123</div>
+            <input type="password" value={pass} onChange={e=>setPass(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doLogin()} placeholder="Password" autoFocus
+              style={{width:"100%",padding:"13px 16px",background:"#07070f",border:"1px solid #2a2a3e",borderRadius:10,color:"#e2e2ff",fontSize:"16px",marginBottom:10}}/>
+            {loginErr&&<div style={{color:"#ff2d55",fontSize:"12px",marginBottom:10}}>{loginErr}</div>}
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>{setScreen("main");setPass("");setLoginErr("");}} style={{flex:1,padding:13,background:"#1e1e2e",border:"1px solid #333",borderRadius:8,color:"#666",cursor:"pointer",fontSize:"13px"}}>Cancel</button>
+              <button onClick={doLogin} style={{flex:1,padding:13,background:"linear-gradient(135deg,#ff2d55,#c70039)",border:"none",borderRadius:8,color:"white",cursor:"pointer",fontSize:"13px",fontWeight:700}}>Login →</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {screen==="admin"&&<AdminPanel db={db} onDelete={handleDelete} onClearAll={handleClear} onClose={()=>setScreen("main")}/>}
+
+      <div style={{padding:"14px 16px",borderBottom:"1px solid #1e1e2e",background:"#0d0d1a",position:"sticky",top:0,zIndex:50}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",maxWidth:600,margin:"0 auto"}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <div style={{width:36,height:36,borderRadius:10,background:"linear-gradient(135deg,#ff2d55,#ff6b35)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,boxShadow:"0 0 14px #ff2d5566",flexShrink:0}}>🔍</div>
+            <div>
+              <div style={{fontSize:"16px",fontWeight:800,letterSpacing:1}}>FAKE JOB <span style={{color:"#ff2d55"}}>DETECTOR</span></div>
+              <div style={{fontSize:"9px",color:"#444"}}>{db.stats.total} SCANS · SAVED IN BROWSER</div>
+            </div>
+          </div>
+          <button onClick={()=>setScreen("login")} style={{padding:"9px 14px",background:"#1e1e2e",border:"1px solid #ff2d5533",borderRadius:8,color:"#ff2d55",cursor:"pointer",fontSize:"12px",display:"flex",alignItems:"center",gap:5}}>🛡️ Admin</button>
+        </div>
+      </div>
+
+      <div style={{maxWidth:600,margin:"0 auto",padding:"16px 16px 80px"}}>
+        {db.stats.total>0&&(
+          <div style={{display:"flex",gap:8,marginBottom:16}}>
+            <Stat label="TOTAL" val={db.stats.total} color="#e2e2ff"/>
+            <Stat label="FAKE" val={db.stats.fake} color="#ff2d55"/>
+            <Stat label="SUSP" val={db.stats.suspicious} color="#ff9f0a"/>
+            <Stat label="LEGIT" val={db.stats.real} color="#30d158"/>
+          </div>
+        )}
+
+        <div style={{display:"flex",gap:8,marginBottom:12,overflowX:"auto",WebkitOverflowScrolling:"touch",paddingBottom:2}}>
+          {EXAMPLES.map(ex=>(
+            <button key={ex.label} onClick={()=>{setJobText(ex.text);setResult(null);setError(null);}} style={{padding:"8px 12px",background:"#1e1e2e",border:"1px solid #2a2a3e",borderRadius:8,color:"#888",fontSize:"11px",cursor:"pointer",whiteSpace:"nowrap",flexShrink:0}}>{ex.label}</button>
+          ))}
+        </div>
+
+        <div style={{position:"relative",marginBottom:12}}>
+          <textarea value={jobText} onChange={e=>setJobText(e.target.value)}
+            placeholder={"Paste a job posting here...\n\nInclude title, company, salary, requirements and contact info for best results."}
+            rows={7}
+            style={{width:"100%",padding:"14px",background:"#0d0d1a",border:"1px solid #2a2a3e",borderRadius:12,color:"#e2e2ff",fontSize:"15px",lineHeight:1.6,resize:"vertical"}}
+            onFocus={e=>e.target.style.borderColor="#ff2d5555"}
+            onBlur={e=>e.target.style.borderColor="#2a2a3e"}
+          />
+          {jobText&&<button onClick={()=>{setJobText("");setResult(null);setError(null);}} style={{position:"absolute",top:10,right:10,background:"#1e1e2e",border:"1px solid #333",borderRadius:6,color:"#555",fontSize:"12px",cursor:"pointer",padding:"3px 8px"}}>✕</button>}
+        </div>
+
+        <button onClick={analyze} disabled={loading||!jobText.trim()} style={{width:"100%",padding:"15px",background:loading||!jobText.trim()?"#1e1e2e":"linear-gradient(135deg,#ff2d55,#c70039)",border:"none",borderRadius:12,color:loading||!jobText.trim()?"#444":"white",fontSize:"15px",fontWeight:700,cursor:loading||!jobText.trim()?"not-allowed":"pointer",letterSpacing:1,boxShadow:loading||!jobText.trim()?"none":"0 4px 20px #ff2d5544",transition:"all .2s",display:"flex",alignItems:"center",justifyContent:"center",gap:8,marginBottom:16}}>
+          {loading?<><Spin/> ANALYZING...</>:"ANALYZE JOB →"}
+        </button>
+
+        {error&&<div style={{padding:"12px 14px",background:"#1a0008",border:"1px solid #ff2d5533",borderRadius:10,color:"#ff2d55",fontSize:"13px",marginBottom:14,lineHeight:1.5}}>⚠ {error}</div>}
+
+        {loading&&(
+          <div style={{padding:"32px 20px",textAlign:"center",background:"#0d0d1a",borderRadius:12,border:"1px solid #1e1e2e",marginBottom:16}}>
+            {["SCANNING TEXT PATTERNS","CHECKING SALARY DATA","ANALYZING COMPANY INFO","DETECTING RED FLAGS"].map((s,i)=>(
+              <div key={i} style={{color:"#222",fontSize:"11px",marginBottom:5,animation:`pulse 1.4s ease ${i*.25}s infinite`}}><span style={{color:"#ff2d55"}}>▸ </span>{s}</div>
+            ))}
+            <div style={{color:"#333",fontSize:"11px",marginTop:10}}>AI is working...</div>
+          </div>
+        )}
+
+        {result&&<ResultCard result={result}/>}
+
+        {db.analyses.length>0&&!loading&&(
+          <div style={{marginTop:24}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <span style={{color:"#333",fontSize:"9px",letterSpacing:2}}>RECENT SCANS</span>
+              <button onClick={()=>setScreen("login")} style={{background:"transparent",border:"none",color:"#444",fontSize:"10px",cursor:"pointer",textDecoration:"underline"}}>view all →</button>
+            </div>
+            {db.analyses.slice(0,4).map((a,i)=>{
+              const cfg=V[a.verdict]||V.SUSPICIOUS;
+              return(
+                <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"11px 12px",background:"#0d0d1a",borderRadius:10,border:"1px solid #1e1e2e",marginBottom:6}}>
+                  <span style={{fontSize:14}}>{cfg.icon}</span>
+                  <span style={{color:"#444",fontSize:"12px",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.jobSnippet}</span>
+                  <Tag verdict={a.verdict}/>
+                  <span style={{color:a.riskScore>70?"#ff2d55":a.riskScore>40?"#ff9f0a":"#30d158",fontSize:"12px",fontWeight:700,minWidth:24,textAlign:"right"}}>{a.riskScore}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div style={{marginTop:24,padding:"12px 14px",background:"#0d0d1a",borderRadius:10,borderLeft:"3px solid #1e1e2e"}}>
+          <p style={{color:"#2a2a3e",fontSize:"11px",lineHeight:1.6,margin:0}}>⚠ AI analysis is a guide only. Always verify via official company websites. Never share personal or financial info with unverified employers.</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
